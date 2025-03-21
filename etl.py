@@ -9,9 +9,12 @@ from collections import Counter
 import json
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
+from pinecone import Pinecone, ServerlessSpec
+from sentence_transformers import SentenceTransformer
 import chromadb
 from chromadb.config import Settings
-from pinecone import Pinecone, ServerlessSpec
+from chromadb.utils import embedding_functions
+
 
 # Load environment variables
 load_dotenv()
@@ -39,6 +42,10 @@ BASE_URL_FOURTH = "https://nvidianews.nvidia.com/news/nvidia-announces-financial
 
 QUARTERS = ['first', 'second', 'third', 'fourth']
 YEARS = range(2021, 2026)
+
+COLLECTION_NAME = "rag_documents"
+PERSIST_DIRECTORY = "./local_chromadb"
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 
 def get_s3_client():
     """Create and return an S3 client."""
@@ -282,45 +289,78 @@ def embedding_data(all_chunks):
     embeddings = create_tfidf_embeddings(all_chunks)
     return embeddings
 
-def store_in_chromadb(embeddings):
-    # ChromaDB configuration
-    local_chromadb_path = os.path.join(os.getcwd(), "local_chromadb")
 
-    # Ensure the directory exists
-    if not os.path.exists(local_chromadb_path):
-        os.makedirs(local_chromadb_path)
 
-    client = chromadb.Client(Settings(
-        persist_directory=local_chromadb_path
-    ))
 
-    collection = client.create_collection(name="nvidia_reports")
+
+
+def get_or_create_collection():
+    """
+    Get or create a ChromaDB collection.
+    """
+    client = chromadb.PersistentClient(path=PERSIST_DIRECTORY)
+    
+    embedding_func = embedding_functions.SentenceTransformerEmbeddingFunction(
+        model_name=EMBEDDING_MODEL
+    )    
 
     try:
-        client.get_collection("nvidia_reports")
-    except Exception as e:
-        print(f"Error with ChromaDB client: {e}")
-    client = chromadb.Client(Settings(persist_directory=local_chromadb_path))  # Local directory
-    collection = client.get_collection("nvidia_reports")
+        collection = client.get_collection(
+            name=COLLECTION_NAME, 
+            embedding_function=embedding_func
+        )
+        print(f"Using existing collection: {COLLECTION_NAME}")
 
-    for embedding in embeddings:
-        try:
-            embedding_values = list(embedding['embedding'].values())
-            if not embedding_values:
-                print(f"Skipping embedding due to empty embedding values.")  # Use print for visibility
-                continue
+    except:
+        collection = client.create_collection(
+            name=COLLECTION_NAME, 
+            embedding_function=embedding_func, 
+            metadata={"hnsw:space": "cosine"}
+        )
+        print(f"Created new collection: {COLLECTION_NAME}")
+    
+    return collection
 
-            # Add the embedding to the ChromaDB collection
-            collection.add(
-                embeddings=[embedding_values],
-                documents=[embedding['text']],
-                metadatas=[embedding['metadata']],
-                ids=[f"{embedding['metadata']['filename']}_{embedding['metadata']['chunk_type']}_{embedding['metadata']['chunk_index']}"]
-            )
-        except Exception as e:
-            print(f"Error adding embedding to ChromaDB: {e}")  # Use print for visibility
+def store_in_chromadb(all_chunks):
+    """
+    Store embeddings in ChromaDB collection.
+    """
+    model = SentenceTransformer(EMBEDDING_MODEL)
+    texts = [chunk['text'] for chunk in all_chunks]
+    embeddings = model.encode(texts, show_progress_bar=True, convert_to_tensor=True)
 
-    return "Stored embeddings in ChromaDB"
+    # Convert embeddings from tensor to a numpy array (or list of lists) before storing
+    embeddings = embeddings.cpu().numpy()  # Convert tensor to numpy array
+
+    collection = get_or_create_collection()
+
+    ids = [
+        f"chunk_{chunk['metadata']['filename']}_{chunk['metadata']['chunk_type']}_{chunk['metadata']['chunk_index']}"
+        for chunk in all_chunks
+    ]
+
+    metadatas = [
+        {"filename": chunk['metadata']['filename'], "chunk_type": chunk['metadata']['chunk_type'], "chunk_index": chunk['metadata']['chunk_index']}
+        for chunk in all_chunks
+    ]
+
+    collection.add(
+        embeddings=embeddings, documents=texts, metadatas=metadatas, ids=ids
+    )
+
+    count = collection.count()
+    print(f"Total documents in collection: {count}")
+
+    return f"Stored {count} embeddings in ChromaDB"
+
+
+
+
+
+
+
+
+
 
 def filter_zero_vectors(vectors):
     """
@@ -386,16 +426,15 @@ def store_in_pinecone(embeddings):
 
 
 
-def storage_data(embeddings):
+def storage_data(embeddings, all_chunks):
     if not embeddings:
         print("No embeddings found for storage")  # Use print for visibility
         return "No embeddings found for storage"
 
-    chroma_result = store_in_chromadb(embeddings)
-    ##pinecone_result = store_in_pinecone(embeddings)
+    chroma_result = store_in_chromadb(all_chunks)
+    pinecone_result = store_in_pinecone(embeddings)
 
-    ##return f"{chroma_result}\n{pinecone_result}"
-    return f"{chroma_result}"
+    return f"{chroma_result}\n{pinecone_result}"
 
 
 def print_first_two_embeddings(embeddings):
@@ -450,8 +489,8 @@ def chunk_data_task(uploaded_files):
 def embedding_task(all_chunks):
     return embedding_data(all_chunks)
 
-def storage_task(embeddings):
-    return storage_data(embeddings)
+def storage_task(embeddings, all_chunks):
+    return storage_data(embeddings, all_chunks)
 
 def main():
     # 1. Scrape Links
@@ -477,7 +516,7 @@ def main():
     print_first_two_embeddings(embeddings)
 
     # 6. Store Data
-    storage_result = storage_task(embeddings)
+    storage_result = storage_task(embeddings, all_chunks)
     print(storage_result)  # Use print for visibility
 
 if __name__ == "__main__":

@@ -32,8 +32,6 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT")
 PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME")
 
-# ChromaDB configuration
-CHROMA_PERSIST_DIRECTORY = os.getenv("CHROMA_PERSIST_DIRECTORY")
 
 # Define base URLs
 BASE_URL_NORMAL = "https://nvidianews.nvidia.com/news/nvidia-announces-financial-results-for-{quarter}-quarter-fiscal-{year}"
@@ -285,8 +283,25 @@ def embedding_data(all_chunks):
     return embeddings
 
 def store_in_chromadb(embeddings):
-    client = chromadb.Client(Settings(persist_directory=CHROMA_PERSIST_DIRECTORY))
+    # ChromaDB configuration
+    local_chromadb_path = os.path.join(os.getcwd(), "local_chromadb")
+
+    # Ensure the directory exists
+    if not os.path.exists(local_chromadb_path):
+        os.makedirs(local_chromadb_path)
+
+    client = chromadb.Client(Settings(
+        persist_directory=local_chromadb_path
+    ))
+
     collection = client.create_collection(name="nvidia_reports")
+
+    try:
+        client.get_collection("nvidia_reports")
+    except Exception as e:
+        print(f"Error with ChromaDB client: {e}")
+    client = chromadb.Client(Settings(persist_directory=local_chromadb_path))  # Local directory
+    collection = client.get_collection("nvidia_reports")
 
     for embedding in embeddings:
         try:
@@ -295,6 +310,7 @@ def store_in_chromadb(embeddings):
                 print(f"Skipping embedding due to empty embedding values.")  # Use print for visibility
                 continue
 
+            # Add the embedding to the ChromaDB collection
             collection.add(
                 embeddings=[embedding_values],
                 documents=[embedding['text']],
@@ -375,11 +391,11 @@ def storage_data(embeddings):
         print("No embeddings found for storage")  # Use print for visibility
         return "No embeddings found for storage"
 
-    ##chroma_result = store_in_chromadb(embeddings)
-    pinecone_result = store_in_pinecone(embeddings)
+    chroma_result = store_in_chromadb(embeddings)
+    ##pinecone_result = store_in_pinecone(embeddings)
 
     ##return f"{chroma_result}\n{pinecone_result}"
-    return f"{pinecone_result}"
+    return f"{chroma_result}"
 
 
 def print_first_two_embeddings(embeddings):

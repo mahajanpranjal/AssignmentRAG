@@ -17,7 +17,7 @@ def safe_json_response(response):
         }
 
 # FastAPI backend URL
-FASTAPI_URL = "http://127.0.0.1:8000"
+FASTAPI_URL = "https://assignmentrag.onrender.com"
 
 
 if "process_success" not in st.session_state:

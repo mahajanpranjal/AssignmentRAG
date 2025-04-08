@@ -2,7 +2,7 @@ import os
 import logging
 import json
 import tempfile
-import fitz
+import fitz 
 import base64
 import boto3
 import openai
@@ -33,6 +33,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 from fastapi import APIRouter
 from openai import OpenAI
+import uvicorn
 
 router = APIRouter()
 
@@ -72,8 +73,7 @@ except Exception as e:
 app = FastAPI()
 app.include_router(router)
 
-API_KEY = os.getenv("MISTRAL_API_KEY")
-client = Mistral(api_key=API_KEY)
+mistral_client = Mistral(api_key=os.getenv("MISTRAL_API_KEY"))
 
 class QueryPayload(BaseModel):
     question: str
@@ -193,58 +193,73 @@ def process_pdf_with_docling(input_pdf_path: Path):
     except Exception as e:
         raise Exception(f"Docling error: {str(e)}")
 
-def extract_links_from_text(text):
+def extract_links_from_text(text: str):
     import re
-    url_pattern = r'https?://[^\s)]+'
-    return re.findall(url_pattern, text)
+    return re.findall(r'https?://[^\s)]+', text)
 
-def extract_tables_from_response(ocr_response):
+
+def extract_tables_from_response(response_dict: dict):
     tables = []
-    for page in ocr_response.get("pages", []):
+    for page in response_dict.get("pages", []):
         for table in page.get("tables", []):
             tables.append(table.get("markdown", ""))
     return tables
 
+def replace_images_in_markdown(markdown_str: str, images_dict: dict) -> str:
+    for img_name, base64_str in images_dict.items():
+        markdown_str = markdown_str.replace(
+            f"![{img_name}]({img_name})",
+            f"![{img_name}](data:image/png;base64,{base64_str})"
+        )
+    return markdown_str
+
 def get_combined_markdown(ocr_response: OCRResponse) -> str:
     markdowns = []
     for page in ocr_response.pages:
-        markdowns.append(page.markdown)
+        image_data = {img.id: img.image_base64 for img in page.images}
+        markdowns.append(replace_images_in_markdown(page.markdown, image_data))
     return "\n\n".join(markdowns)
+
   
-def process_pdf_with_mistral(uploaded_pdf):
+def process_pdf_with_mistral(uploaded_pdf_bytes: bytes):
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-            temp_pdf_path = Path(tmp_file.name)
-            temp_pdf_path.write_bytes(uploaded_pdf)
+            tmp_file.write(uploaded_pdf_bytes)
+            tmp_file.flush()
+            temp_path = Path(tmp_file.name)
+        uploaded_file = mistral_client.files.upload(
+            file={
+                "file_name": temp_path.name,
+                "content": uploaded_pdf_bytes  
+            },
+            purpose="ocr"
+        )
 
-        with open(temp_pdf_path, 'rb') as file:
-            uploaded_file = client.files.create(
-                file=file, 
-                purpose="ocr"
-            )
+        signed_url = mistral_client.files.get_signed_url(
+            file_id=uploaded_file.id,
+            expiry=10
+        )
 
-        signed_url = client.files.get_signed_url(file_id=uploaded_file.id, expiry=1)
-        
-        pdf_response = client.ocr.process(
+        ocr_response = mistral_client.ocr.process(
             document=DocumentURLChunk(document_url=signed_url.url),
             model="mistral-ocr-latest",
             include_image_base64=True
         )
 
-        response_dict = json.loads(pdf_response.model_dump_json())
-        extracted_text = response_dict["pages"][0]["markdown"]
-        extracted_links = extract_links_from_text(extracted_text)
-        extracted_tables = extract_tables_from_response(response_dict)
-        combined_markdown = get_combined_markdown(pdf_response)
+        response_dict = json.loads(ocr_response.model_dump_json())
+        combined_markdown = get_combined_markdown(ocr_response)
+        links = extract_links_from_text(combined_markdown)
+        tables = extract_tables_from_response(response_dict)
 
         return {
             "combined_markdown": combined_markdown,
-            "extracted_links": extracted_links,
-            "extracted_tables": extracted_tables
+            "extracted_links": links,
+            "extracted_tables": tables
         }
 
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"Mistral OCR failed: {str(e)}"}
+
  
 @app.post("/process_pdf")
 async def process_pdf(file: UploadFile = File(...), parser: str = Form(...)):
@@ -259,19 +274,16 @@ async def process_pdf(file: UploadFile = File(...), parser: str = Form(...)):
         elif parser == "mistral_ocr":
             logger.info("Using Mistral OCR parser...")
             extracted_data = process_pdf_with_mistral(pdf_bytes)
-            
-            logger.info(f"Mistral OCR response: {json.dumps(extracted_data)[:200]}...")
-            
+
             if "error" in extracted_data:
-                logger.error(f"Mistral OCR error: {extracted_data['error']}")
-                raise HTTPException(status_code=500, detail=f"Mistral OCR error: {extracted_data['error']}")
-            
-            if not extracted_data.get("pages"):
-                logger.error("No 'pages' field in Mistral OCR response")
-                raise HTTPException(status_code=500, detail="Invalid Mistral OCR response format: no pages found")
-            
-            markdown_content = extracted_data.get("pages", [{}])[0].get("markdown", "")
-            logger.info(f"Extracted markdown content length: {len(markdown_content) if markdown_content else 0}")
+                raise HTTPException(status_code=500, detail=extracted_data["error"])
+
+            markdown_content = extracted_data.get("combined_markdown", "")
+            logger.info(f"Extracted markdown content length: {len(markdown_content)}")
+
+            if not markdown_content:
+                logger.error("Markdown content is None or empty")
+                raise HTTPException(status_code=500, detail="Failed to generate markdown content")
         
         elif parser == "docling":
             logger.info("Using Docling parser...")
@@ -778,3 +790,8 @@ def generate_answer(payload: AnswerRequest):
     except Exception as e:
         logger.error(f"RAG query failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="RAG query failed.")
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    print(f"Starting server on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)

@@ -61,14 +61,16 @@ pc = Pinecone(api_key=PINECONE_API_KEY)
 # ChromaDB configuration
 COLLECTION_NAME = "rag_documents"
 PERSIST_DIRECTORY = "./local_chromadb"
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+EMBEDDING_MODEL = "text-embedding-3-small"
 
+'''
 try:
     embedding_model = SentenceTransformer(EMBEDDING_MODEL)
     print(f"SentenceTransformer model '{EMBEDDING_MODEL}' loaded successfully.")
 except Exception as e:
     print(f"Error loading SentenceTransformer model: {e}")
     embedding_model = None
+'''
 
 app = FastAPI()
 app.include_router(router)
@@ -313,9 +315,8 @@ async def process_pdf(file: UploadFile = File(...), parser: str = Form(...)):
         logger.error(f"Error processing PDF: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
  
- 
+'''
 def create_sentence_transformer_embeddings(chunks):
-    """Creates embeddings for the given chunks using SentenceTransformer."""
     global embedding_model
     if embedding_model is None:
         raise ValueError("Embedding model not initialized.")
@@ -334,7 +335,30 @@ def create_sentence_transformer_embeddings(chunks):
         })
  
     return result
- 
+'''
+
+def create_openai_embeddings(chunks):
+    texts = [chunk['text'] for chunk in chunks]
+    
+    client = OpenAI(api_key=os.getenv("GPT4o_API_KEY"))
+
+    response = client.embeddings.create(
+        input=texts,
+        model="text-embedding-3-small"
+    )
+
+    embeddings = [record.embedding for record in response.data]
+
+    result = []
+    for i, chunk in enumerate(chunks):
+        result.append({
+            "embedding": embeddings[i],
+            "metadata": chunk["metadata"],
+            "text": chunk["text"][:300]
+        })
+
+    return result
+
 def fetch_files_from_s3():
     s3_client = get_s3_client()
     response = s3_client.list_objects_v2(Bucket=S3_BUCKET_NAME, Prefix=S3_PREFIX)
@@ -520,6 +544,7 @@ def filter_zero_vectors(vectors):
             print(f"Vector {vector[0]} contains only zeros and will not be upserted.")  
     return non_zero_vectors
 
+'''
 def create_query_vector(question: str) -> np.ndarray:
     global embedding_model  
     if embedding_model is None:
@@ -531,6 +556,19 @@ def create_query_vector(question: str) -> np.ndarray:
     except Exception as e:
         logger.error(f"Error creating embedding for question: {e}")
         raise HTTPException(status_code=500, detail=f"Error creating embedding: {str(e)}")
+'''
+
+def create_query_vector(question: str) -> list:
+    try:
+        client = OpenAI(api_key=os.getenv("GPT4o_API_KEY"))
+        response = client.embeddings.create(
+            model="text-embedding-3-small",
+            input=[question]
+        )
+        return response.data[0].embedding
+    except Exception as e:
+        logger.error(f"Error creating OpenAI embedding: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate query embedding.")
 
 def query_chromadb(question: str, quarters: list):
     try:
@@ -572,7 +610,7 @@ def query_pinecone(question: str, quarters: list):
         query_vector = create_query_vector(question)
 
         vector_dim = len(query_vector)
-        expected_dim = 384 
+        expected_dim = 1536 
         
         if vector_dim != expected_dim:
             logger.warning(f"Query vector dimension {vector_dim} does not match expected dimension {expected_dim}")
@@ -590,7 +628,7 @@ def query_pinecone(question: str, quarters: list):
         index = pc.Index(PINECONE_INDEX_NAME)
 
         results = index.query(
-            vector=query_vector.tolist(),
+            vector=query_vector,
             top_k=5,
             include_metadata=True,
             filter=filter_dict if filter_dict else None
@@ -702,7 +740,8 @@ async def process_chunks(payload: ProcessChunkPayload):
         if not chunks:
             raise HTTPException(status_code=400, detail="No chunks generated.")
 
-        embeddings = create_sentence_transformer_embeddings(chunks)
+        ##embeddings = create_sentence_transformer_embeddings(chunks)
+        embeddings = create_openai_embeddings(chunks)
         logger.info(f"Created {len(embeddings)} embeddings.")
 
         if vector_db == "pinecone":

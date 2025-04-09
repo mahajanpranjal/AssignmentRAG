@@ -1,6 +1,0 @@
-streamlit
-requests
-docling
-markdown-it-py  # correct name instead of "MarkItDown"
-mistralai
-ipython

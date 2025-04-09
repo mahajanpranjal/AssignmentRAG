@@ -1,0 +1,10 @@
+requests
+beautifulsoup4
+boto3
+python-dotenv
+numpy
+scikit-learn
+pinecone-client
+sentence-transformers
+chromadb
+sentence_transformers

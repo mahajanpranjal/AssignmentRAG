@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+boto3
+openai
+pydantic
+python-dotenv
+Pillow
+numpy
+requests  
+PyMuPDF
+chromadb
+mistralai
+docling
+pinecone
+git+https://github.com/brandonstarxel/chunking_evaluation.git
+python-multipart

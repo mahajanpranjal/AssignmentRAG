@@ -1,7 +1,5 @@
 import streamlit as st
 import requests
-import logging
-import os
 import json
 
 

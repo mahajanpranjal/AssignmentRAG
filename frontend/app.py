@@ -15,7 +15,7 @@ def safe_json_response(response):
         }
 
 # FastAPI backend URL
-FASTAPI_URL = "https://assignmentrag.onrender.com"
+FASTAPI_URL = "https://travel-api-618360345344.us-central1.run.app"
 
 
 if "process_success" not in st.session_state:
